@@ -1,0 +1,756 @@
+---
+title: "Choe2020_Vignette"
+author: Ha Na Choe
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+***
+
+## Following steps are for after RNA-seq data has been aligned using STAR/Kallisto and assigned correct sample IDs to sequencing IDs
+
+
+### Use DESeq2 package in R to find DEGs, tidyverse to wrangle data and ggplot for visualization
+* Load appropriate libraries
+* Load appropriate sample STAR aligned data (all of the Area X & Medial Striatum data have been provided)
+  + For example Vignette, just male vehicle (MalVeh) Area X/medial striatum is shown
+    * Results from females and other treatments are provided for plotting portion of Vignette
+  + Vignette only includes the unpaired analysis. Instructions for paired are included.
+
+```{r Load necessary libraries and data for running DESeq2}
+
+library(mixtools)
+library(seqinr)
+library(ape)
+library(edgeR)
+library(DESeq2)
+library(lattice)
+library(MASS)
+library(gplots)
+library(calibrate)
+library(plotly) 
+library(tidyverse) 
+library(ggrepel)
+library(biomaRt)
+
+MalVeh_X_STARcounts <- read.table("Counts_MV_mstX_STAR.tsv")
+
+```
+
+
+### Make matrix for labels and gene names prior to running DESeq2
+* See DESeq2 documentation for specific directions on how to make label matrix
+  + Example uses the terms "Sex#_Tx_Surr" & "Sex#_Tx_Nuc" for surround and nucleus.
+  + Useful to specify sex, treatment, and the actual nucleus for downstream applications to avoid confusion.
+    * e.g. "Mal1_Veh_LAi" & "Mal1_Veh_RA"
+  + Also change the Sample ID's in the count matrix to match the labels
+* A much larger version for all samples is needed when creating PCA plot/distance matrix. 
+  + Instead of one Sex, one Tx, 2 areas, 3 subjects (6 samples); Use two sex, three Tx, 8 areas, 3 subjects (144 samples)
+  
+```{r Label matrix for DESeq2 and match sample IDs to label names}
+
+diffExpression_labels_SexTx <- data.frame(
+  FileName = c("Sex1_Tx_Surr","Sex2_Tx_Surr","Sex3_Tx_Surr",
+               "Sex1_Tx_Nuc","Sex2_Tx_Nuc","Sex3_Tx_Nuc"),
+  Subject = c("A","B","C","A","B","C"),
+  Area = c(0,0,0,1,1,1))
+
+colnames(MalVeh_X_STARcounts) <- diffExpression_labels_SexTx[["FileName"]]
+
+```
+
+###Get gene names from ensembl using BioMart, for this STAR example we use the ensembl gene IDs
+*  change the "ensembl_gene_id" to different catagory if using different annotation methods
+  + Gene ID
+  + Transcript ID
+  + HGNC ID
+  + etc. 
+* Double check these, on 11/27/2019 there were some problems where complete genes were erased, but seems to have been resolved as of 11/30/2020.
+* Choe2020 used ensembl data from older assembly (TaeGut3.2.4: Release 98)
+  + Older "mart", "TaeGutEnsembl" and "genelist" have been provided as .rds objects.
+  + These will likely be obsolete by time anyone uses this vignette, but provided in case its helpful
+* Vignette will likely use new assembly, bTaeGut1_v1.p
+
+```{r BioMart}
+
+mart <- useMart('ensembl')
+TaeGutEnsembl <- useMart("ensembl", dataset = "tguttata_gene_ensembl")
+genelist <- getBM(attributes = c("ensembl_gene_id", "external_gene_name"), mart = TaeGutEnsembl)
+
+```
+
+###Run DESeq2 with unpaired deisgn for Male Vehicle Area X/medial striatum with STAR aligned data
+* Run DESeq2 on appropriate count data matrix ("Output_of_aggregation") to output results as a data frame and a dds object
+  + The count matrix/output of aggregation used here is of 6 samples: 1 sex, 1 Tx, 2 regions, 3 replicates
+  + DESeq2 can take a while so: 
+    * Double check and make sure the organization of the count data matrix columns match the label matrix order **exactly**
+  + Run two sets of DE comparisons:
+    * Non-pairwise comparisons of area for average comparisons. More stringent comparisons across group averages
+      + design = ~Area (Shown here)
+    * Pairwise comparisons of area within subject for individual comparisons. Less stringent between group comparisons
+      + design = ~Subject + Area
+  + Repeat for other alignment method (if using more than 1 alignment method for cross validation)
+    * STAR (Shown here)
+    * Kallisto (previously run Kallisto results have been included as a .tsv in sample data)
+
+```{r Make and run DESeq2 functions for reporting DEG results in tabular format and as a dds object for plotting}
+
+DiffExp2 <- function(Labels, Output_of_aggregation) {
+  Area <- factor(Labels$Area);#DESEQ2
+  Subject <- factor(Labels$Subject);#edgeR
+  design <- model.matrix(~Subject+Area) #edgeR
+  dds <- DESeq2::DESeqDataSetFromMatrix(Output_of_aggregation, Labels, design = ~Area); #DESEQ2
+  dds <- DESeq(dds) #DESEQ2
+  res <- results(dds) #DESEQ2
+  tabl <- as.data.frame(res) #DESEQ2
+  tabl <- rownames_to_column(tabl, var = "id") #DESEQ2
+  result <- merge(Output_of_aggregation, tabl, by.x=0, by.y="id",sort=F)
+  colnames(result)[1] <- "id"
+  named_result <- merge(x=genelist, y=result, by.x="ensembl_gene_id", by.y="id", all=TRUE)
+  return(named_result)
+}
+
+DDS <- function(Labels, Output_of_aggregation) {
+  Area <- factor(Labels$Area);#DESEQ2
+  Subject <- factor(Labels$Subject);#edgeR
+  design <- model.matrix(~Subject+Area) #edgeR
+  dds <- DESeq2::DESeqDataSetFromMatrix(Output_of_aggregation, Labels, design = ~Area); #DESEQ2
+  dds <- DESeq(dds) #DESEQ2
+  return(dds)
+}
+
+DEG_MalVeh_X_STAR <- DiffExp2(diffExpression_labels_SexTx, MalVeh_X_STARcounts)
+DDS_MalVeh_X_STAR <- DDS(diffExpression_labels_SexTx, MalVeh_X_STARcounts)
+
+#Write results to a .tsv
+write_tsv(DEG_MalVeh_X_STAR, "DEG_MalVeh_X_STAR.tsv")
+
+#Write dds object to an R data object (.rds)
+saveRDS(DDS_MalVeh_X_STAR, "DDS_MalVeh_X_STAR.rds")
+```
+
+###Load other provided sample results 
+* These were run previously, but can be run again if desired
+
+```{r Loading previously run results}
+
+DEG_MalE2_X_STAR <- read_tsv("DEG_MalE2_X_STAR.tsv")
+DEG_MalExem_X_STAR <- read_tsv("DEG_MalExem_X_STAR.tsv")
+DEG_FemVeh_X_STAR <- read_tsv("DEG_FemVeh_X_STAR.tsv")
+DEG_FemE2_X_STAR <- read_tsv("DEG_FemE2_X_STAR.tsv")
+DEG_FemExem_X_STAR <- read_tsv("DEG_FemExem_X_STAR.tsv")
+
+DEG_MalVeh_X_Kallisto <- read_tsv("DEG_MalVeh_X_Kallisto.tsv")
+DEG_MalE2_X_Kallisto <- read_tsv("DEG_MalE2_X_Kallisto.tsv")
+DEG_MalExem_X_kallisto <- read_tsv("DEG_MalExem_X_Kallisto.tsv")
+DEG_FemVeh_X_Kallisto <- read_tsv("DEG_FemVeh_X_Kallisto.tsv")
+DEG_FemE2_X_Kalliso <- read_tsv("DEG_FemE2_X_Kallisto.tsv")
+DEG_FemExem_X_Kallisto <- read_tsv("DEG_FemExem_X_Kallisto.tsv")
+
+```
+
+
+###Combine DESeq2 results into a list of data frames, organized by brain region
+* Each list made of results data frame
+* Used to filter out and keep DEGs that pass a cutoff (FDR <0.5) 
+* This Vignette will include example from STAR and Kallisto:
+  + If using two or more alignment methods for cross validation, keep the ordering CONSISTENT
+    * e.g. 
+    1. MalVeh
+    2. MalE2
+    3. MalExem
+    4. FemVeh
+    5. FemE2
+    6. FemExem 
+
+```{r Making an Area X list of STAR results and Kallisto results}
+
+STAR_Combined_X <- list(
+"MalVeh_X" = DEG_MalVeh_X_STAR,
+"MalE2_X" = DEG_MalE2_X_STAR,
+"MalExem_X" = DEG_MalExem_X_STAR,
+"FemVeh_X" = DEG_FemVeh_X_STAR,
+"FemE2_X" = DEG_FemE2_X_STAR,
+"FemExem_X" = DEG_FemExem_X_STAR)
+
+Kallisto_Combined_X <- list(
+"MalVeh_X" = DEG_MalVeh_X_Kallisto,
+"MalE2_X" = DEG_MalE2_X_Kallisto,
+"MalExem_X" = DEG_MalExem_X_kallisto,
+"FemVeh_X" = DEG_FemVeh_X_Kallisto,
+"FemE2_X" = DEG_FemE2_X_Kalliso,
+"FemExem_X" = DEG_FemExem_X_Kallisto)
+
+```
+
+###Filter and only keep DEG results with unique gene names (not just ensembl gene names), then filter and only keep DEG results that pass a cutoff. For us we chose FDR/pAdj <0.05
+* Functions for filtering for gene names. 
+* This version also deletes duplicated entries
+* Generated lists can be used to find DEGs common between STAR and Kallisto aligned data.
+* Significance filtering function will also pull the log2FC and FDR/pAdj from the STAR aligned data. 
+  + These are not useful for making the common genes list, but used later for generating plots.
+
+```{r Functions to filter and discard results without unique gene names, duplicates and insignificant results (FDR/pAdj >0.05)}
+
+STAR_Filter_List_DEG <- function(List_Combined_DEG) {
+  Filtered_list <- list()
+  for (i in 1:length(List_Combined_DEG)) {
+    current_tbl <- List_Combined_DEG[[i]]
+    current_tbl <- subset(current_tbl, !duplicated(external_gene_name))
+    filtered_tbl <- dplyr::filter(current_tbl, external_gene_name !="") %>%
+    dplyr::select(external_gene_name, log2FoldChange, padj)
+    Filtered_list[[i]] <- filtered_tbl
+  }
+  names(Filtered_list) <- names(List_Combined_DEG)
+  return(Filtered_list)
+}
+
+Kallisto_Filter_List_DEG <- function(List_Combined_DEG) {
+  Filtered_list <- list()
+  for (i in 1:length(List_Combined_DEG)) {
+    current_tbl <- List_Combined_DEG[[i]]
+    current_tbl <- subset(current_tbl, !duplicated(id))
+    filtered_tbl <- dplyr::filter(current_tbl, id !="") %>%
+    dplyr::select(id, log2FoldChange, padj)
+    Filtered_list[[i]] <- filtered_tbl
+  }
+  names(Filtered_list) <- names(List_Combined_DEG)
+  return(Filtered_list)
+}
+
+Sig_genes_Only <- function(List_Filtered_list){
+  Sig_list <- list()
+  for (i in 1:length(List_Filtered_list)) {
+    current_tbl <- List_Filtered_list[[i]]
+    current_tbl <- dplyr::filter_at(current_tbl, vars(starts_with("pad")), any_vars(. < 0.05))
+    Sig_list[[i]] <- current_tbl
+  }
+  names(Sig_list) <- names(List_Filtered_list)
+  return(Sig_list)
+}
+
+
+X_STAR <- STAR_Filter_List_DEG(STAR_Combined_X) %>% Sig_genes_Only()
+X_Kallisto <- Kallisto_Filter_List_DEG(Kallisto_Combined_X) %>% Sig_genes_Only()
+
+
+```
+
+###Need to keep common genes, only important if multiple alignment methods were used to cross-validate
+* Only keep genes that are common between the STAR and Kallisto lists with log2FC and pAdj values from preferred alignment method. For us, this was STAR.
+
+```{r Function to filter and keep DEGs common between STAR and Kallisto, keeping log2FC/pAdj from STAR}
+
+Pull_common <- function(STAR_list, Kallisto_list) {
+  STAR_kallisto <- list()
+  for (i in 1:6) {
+    current_STAR <- STAR_list[[i]]
+    current_Kallisto <- Kallisto_list[[i]]
+    current_STAR_kallisto <- semi_join(current_STAR, current_Kallisto, by = c("external_gene_name" = "id"))
+    STAR_kallisto[[i]] <- current_STAR_kallisto
+  }
+  names(STAR_kallisto) <- names(STAR_list)
+  return(STAR_kallisto)
+}
+
+X <- Pull_common(X_STAR, X_Kallisto)
+
+```
+
+
+
+###Seperate filtering to only keep male vehicle DEGs to use as cross sex/Tx control
+* Used for generating heatmaps where all DEGs (significant or not) were compared to Male Veh
+* Only keep genes that are common between the STAR and Kallisto lists in Male Vehicle condition with log2FC and pAdj values from preferred alignment method. For us, this was STAR.
+  + Unlike the ones for all sex/Tx, this one returns a **dataframe** and not a **list**.
+
+```{r Filter the DEG dataframe to only include entries significant values in Male/Veh group}
+
+Join_DEG_list <- function(Filtered_List_Combined_DEG){
+  Filtered <- Filtered_List_Combined_DEG
+  Joined_tbl <- Filtered[[1]] 
+  for (i in 2:length(Filtered)) {
+    current_tbl <- (Filtered[[i]])
+    Joined_tbl <- full_join(Joined_tbl, current_tbl, by = "external_gene_name")
+  }  
+  return(Joined_tbl)
+}
+
+Join_DEG_list_Kallisto <- function(Filtered_List_Combined_DEG){
+  Filtered <- Filtered_List_Combined_DEG
+  Joined_tbl <- Filtered[[1]] 
+  for (i in 2:length(Filtered)) {
+    current_tbl <- (Filtered[[i]])
+    Joined_tbl <- full_join(Joined_tbl, current_tbl, by = "id")
+  }  
+  return(Joined_tbl)
+}
+
+Sig_genes_Only_MV <- function(Filtered_List_Combined_DEG){
+  DEG_tbl <- Join_DEG_list(Filtered_List_Combined_DEG)
+  filtered_FC_sig_table <- dplyr::filter_at(DEG_tbl, vars("padj.x"), any_vars(. < 0.05))
+  filtered_FC_sig_table <- column_to_rownames(filtered_FC_sig_table, var = "external_gene_name")
+  colnames(filtered_FC_sig_table) <- paste(rep(names(Filtered_List_Combined_DEG)
+                                               [1:length(Filtered_List_Combined_DEG)], each = 2),
+                                           colnames(dplyr::select(Filtered_List_Combined_DEG[[1]], 
+                                                                  log2FoldChange,padj)), sep = ".")
+  filtered_FC_sig_table <- rownames_to_column(filtered_FC_sig_table, var = "external_gene_name")
+  return(filtered_FC_sig_table)
+}  
+
+Sig_genes_Only_MV_Kallisto <- function(Filtered_List_Combined_DEG){
+  DEG_tbl <- Join_DEG_list_Kallisto(Filtered_List_Combined_DEG)
+  filtered_FC_sig_table <- dplyr::filter_at(DEG_tbl, vars("padj.x"), any_vars(. < 0.05))
+  filtered_FC_sig_table <- column_to_rownames(filtered_FC_sig_table, var = "id")
+  colnames(filtered_FC_sig_table) <- paste(rep(names(Filtered_List_Combined_DEG)
+                                               [1:length(Filtered_List_Combined_DEG)], each = 2),
+                                           colnames(dplyr::select(Filtered_List_Combined_DEG[[1]], 
+                                                                  log2FoldChange,padj)), sep = ".")
+  filtered_FC_sig_table <- rownames_to_column(filtered_FC_sig_table, var = "id")
+  return(filtered_FC_sig_table)
+}  
+
+X_STAR_MV <- STAR_Filter_List_DEG(STAR_Combined_X) %>% Sig_genes_Only_MV()
+X_Kallisto_MV <- Kallisto_Filter_List_DEG(Kallisto_Combined_X) %>% Sig_genes_Only_MV_Kallisto()
+X_common_MV <- semi_join(X_STAR_MV, X_Kallisto_MV, by = c("external_gene_name" = "id"))
+```
+
+
+
+###Remove activity dependent genes (ADGs) identified in the Whitney et Al 2014 paper
+* These were found in the Whitney et al 2014 supplemental data.
+* Manually selected using spreadsheet software like Microsoft Excel or LibreOffice Calc.
+* Ones used in Choe2020 are included as .csv files
+* Output of the X_noADG_MV will be used for heatmapping further down
+
+```{r Function to remove ADGs/IEGs from the common DEG list}
+
+X_ADG <- read_csv("X_ADG.csv", col_names = TRUE)
+
+removeADG <- function(common_list, ADG){
+  no_ADG <- list()
+  for (i in 1:6) {
+    current <- as.data.frame(common_list[[i]])
+    current <- current[!current$external_gene_name %in% ADG$gene, ]
+    no_ADG[[i]] <- current
+  }
+  names(no_ADG) <- names(common_list)
+  return(no_ADG)
+}
+
+X_noADG <- removeADG(X, X_ADG)
+X_noADG_MV <- X_common_MV[!X_common_MV$external_gene_name %in% X_ADG$gene, ]
+
+
+```
+
+
+#Now that the DEG results have been generated and filtered, time to make plots
+
+###PCA plot of all data. This takes a VERY long time. Not advisable in the vignette, but script has been provided and commented out. 
+* PCA requires:
+  + DESeq2 vst pipeline (see original documentation) on all of (144) the samples
+    * Count matrixes/Outputs of aggregation used before have been merged for the full 144
+  + Repeat for Area X & MSt only by using Area X and MSt samples (36 samples)
+    * Remake the count matrix as appropriate
+  + diffExpression_label is the same as one shown above for regular DEG analysis with DESeq2
+    * Instead of 6 samples, make labels for 144 or 36
+  + ggplot package to generate plots
+    * See ggplot documentation for aesthetic changes.
+    * Sample here uses colors for regions/areas, fill for sex, and shape for treatment.
+
+```{r DEG on all samples & on Striatum samples and PCA}
+
+# DEGall <- DESeq2::DESeqDataSetFromMatrix(MergedCounts_byGroup, diffExpression_labels, design = ~Subject + Area)
+# DEGall <- DESeq(DEGall)
+# vDEGall <- vst(DEGall, blind=FALSE)
+# pcaAll <- plotPCA(vDEGall, intgroup=c("Area", "Sex","Treatment"), returnData=TRUE)
+# percentVar <- round(100 * attr(pcaAll, "percentVar"))
+# PCA<- ggplot(pcaAll, aes(PC1, PC2, stroke=1.5)) +
+#   geom_jitter(aes(shape=Treatment, color=Area, fill=Sex, size=Treatment)) +
+#   scale_shape_manual(values = c(21,24,23)) +
+#   scale_size_manual(values = c(4,4,4)) +
+#   scale_fill_manual(values = c("Black","Red")) +
+#   guides(fill = guide_legend(override.aes=list(size=3, color=c("Black","Red"))),
+# shape = guide_legend(override.aes = list(size=3, stroke=1.5)),
+# color = guide_legend(override.aes = list(size=1, stroke=2))) +
+#   xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+#   ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+#   stat_ellipse(aes(color=Area), type = "euclid", level = 2) +
+#   theme(legend.title = element_text(size=12),
+# legend.text = element_text(size=10),
+# axis.title.x=element_text(size=15),
+# axis.title.y=element_text(size=15),
+# axis.text.x=element_text(size=15),
+# axis.text.y=element_text(size=15)) +
+#   theme(panel.background = element_rect(fill = 'gray95'))
+# coord_fixed()
+# 
+
+```
+
+
+###Make heatmaps with all DEG results (significant or not) are compared to Male Veh control group
+* DDS_rlog to normalizing reads for individual DEG analysis
+  + Output the normalized reads for each region (both nucleus and surround) for each animal in the Sex/Tx group. 
+  + Only keep genes that are in the pulled genelist. 
+    * This is a character vector pulled from "X_noADG_MV" above, only keeping gene names of Male Veh DEGs w/ FDR <0.05
+  + Use any prior STAR DEG results to bridge the ensembl symbols used in the Count matrix/Output of aggregation to the external_gene_names.
+  + Use the same 6 sample labels (1 sex, 1 Tx, 2 regions, 3 replicates)
+  + Need to repeat for each Sex/Tx as done previously for finding DEGs
+
+```{r Function to run DESeq2 and rlog normalize the data, only keeping genes with unique gene names, discarding genes with no names & duplicate entries}
+
+X_MV_genelist <- as.data.frame((X_noADG_MV)[1])
+names(X_MV_genelist)[[1]] <- "external_gene_name"
+
+DDS_rlog <- function(Labels, Output_of_aggregation, GeneList, priorDEG) {
+  Area <- factor(Labels$Area);#DESEQ2
+  dds <- DESeq2::DESeqDataSetFromMatrix(Output_of_aggregation, Labels, design = ~Area);
+  dds <- DESeq(dds)
+  lds <- rlog(dds)
+  sa <- SummarizedExperiment::assay(lds)
+  ensembl_symbol <- left_join(GeneList, priorDEG, by= "external_gene_name")
+  ensembl_DEGs <- as.data.frame(dplyr::select(ensembl_symbol, external_gene_name, ensembl_gene_id))
+  sa <- as.data.frame(sa)
+  sa <- rownames_to_column(sa, "ensembl_gene_id")
+  msa <- left_join(ensembl_DEGs, sa, by = "ensembl_gene_id")
+  return(msa)
+}
+
+```
+
+###For generating heatmaps with individuals, you need to manually calculate fold changes for each subject
+* Calculate & merge the LOG2FC generated with the doMath and mergeMath function
+  + LOG2(A/B) = LOG2(A) - LOG2(B)
+  + LOG2FC (nucleus vs Surround) = LOG2(nucleus) - LOG2(surround)
+    * Subtract columns matching to the animal (6&3, 7&4, 8&5) and write to a new table with just the subject name
+      + Order of samples from individual areas are always the same, as defined by the diffExpression_labels made above
+        * Example in this vignette only uses Male Vehicle
+        * Prior run DDS_rlog results have been included as .rds
+* This will give a larger dataframe of subjects as columns subjects. 
+
+```{r Find the log2FC of individuals for generating the individual heatmaps, and merge results into a new dataframe}
+
+doMath <- function(DDS_results){
+  DDS_results$Sub1 <- DDS_results[,6] - DDS_results[,3]
+  DDS_results$Sub2 <- DDS_results[,7] - DDS_results[,4]
+  DDS_results$Sub3 <- DDS_results[,8] - DDS_results[,5]
+  Subnames <- substr(colnames(DDS_results[1,]), start = 1, stop = 8)
+  Subonly <- DDS_results %>% dplyr::select(external_gene_name, Sub1, Sub2, Sub3)
+  colnames(Subonly) <- Subnames[c(1, 3:5)]
+  return(Subonly)
+}
+
+mergeMath <- function(list_of_Mathed_subregion) {
+  FC_individuals <- doMath(list_of_Mathed_subregion[[1]])
+  for (i in 2:length(list_of_Mathed_subregion)) {
+    FC_next <- doMath(list_of_Mathed_subregion[[i]])
+    FC_individuals <- left_join(FC_individuals, FC_next, by = "external")
+  }
+  return(FC_individuals)
+}
+
+
+#Run the DDS_rlog function
+MalVeh_X_DDS_rlog_MV <- DDS_rlog(diffExpression_labels_SexTx, MalVeh_X_STARcounts, X_MV_genelist, DEG_MalVeh_X_STAR)
+
+#Load prior DDS_rlog results generated in July 2019 (TaeGut3.2.4: Release 98)
+#Vignette will likely use new assembly, bTaeGut1_v1.p
+#Expect slightly different results
+MalE2_X_DDS_rlog_MV <- readRDS("DDS_rlog_MalE2_X_MV.rds")
+MalExem_X_DDS_rlog_MV <- readRDS("DDS_rlog_MalExem_X_MV.rds")
+FemVeh_X_DDS_rlog_MV <- readRDS("DDS_rlog_FemVeh_X_MV.rds")
+FemE2_X_DDS_rlog_MV <- readRDS("DDS_rlog_FemE2_X_MV.rds")
+FemExem_X_DDS_rlog_MV <- readRDS("DDS_rlog_FemExem_X_MV.rds")
+
+#Make a list of the DDS_rlog results
+X_rlog_Group <- list(MalVeh_X_DDS_rlog_MV, MalE2_X_DDS_rlog_MV, MalExem_X_DDS_rlog_MV, FemVeh_X_DDS_rlog_MV, FemE2_X_DDS_rlog_MV, FemExem_X_DDS_rlog_MV)
+
+#Run Math functions
+X_individual_FC_MV <- mergeMath(X_rlog_Group)
+```
+
+###Generate heatmap for rlog normalized DESeq2 results with each individual’s fold change values
+* log2 fold change value range is very big, to make for easier visualization extreme values should be binned
+* Choe2020 set bins at |2| (4x fold change) although other cutoffs are valid
+* Generate heatmaps using the package "Heatmaply"
+* Turn off seriation to try and keep male samples to the left. May need to flip some branches post in image editing software.
+* See documentation for "heatmaply" for further details
+* Colors for values chosen as personal aesthetic
+
+
+```{r Generate individual animal heatmap using the heatmaply package, seriation off, from rlog normalized log2FC results that have been binned to |2|}
+
+library(heatmaply)
+
+#Bin log2FC to |2|
+bucket <- function(DEG) {
+  rownames(DEG) <- c()
+  DEG <- column_to_rownames(DEG, var = "external")
+  DEG[DEG < -2] <- -2
+  DEG[DEG > 2] <- 2
+  DEG <- na.omit(DEG)
+  return(DEG)
+}
+
+X_individual_FC_bucket <- bucket(X_individual_FC_MV)
+
+#Make heatmaps, these are interactive in browsers
+heatmaply(X_individual_FC_bucket, scale_fill_gradient_fun = scale_fill_gradient2(
+  low="blue", high="red", mid="white", midpoint=0, limits = c(-2,2)), seriate = "none",
+  Colv = TRUE, col_side_colors = rep(c("MV", "ME", "MX", "FV", "FE", "FX"), each=3),
+  side_color_layers = scale_fill_manual(values = c(
+    "MV"="purple", "ME"="blue", "MX"="green", 
+    "FV"="firebrick1", "FE"="darkorange", "FX"="gold")),
+  file = "X_HM_2FC_individuals_MV.html")
+
+
+```
+
+
+###Generate heatmap for DESeq2 results with group averages fold change values. 
+  * No need for rlog transformation since this will be averages across replicates
+    + Same colors as individual. Also no seriation.
+
+```{r Generate group average heatmap using the heatmaply package, seriation off, from rlog normalized log2FC results that have been binned to |2|}
+
+X_group_FC_MV <- dplyr::select(X_noADG_MV, "external_gene_name", ends_with("Change"))
+names(X_group_FC_MV)[[1]] <- "external"
+X_group_MV_bucket <- bucket(X_group_FC_MV)
+
+heatmaply(X_group_MV_bucket, scale_fill_gradient_fun = scale_fill_gradient2(
+              low="blue", high="red", mid="white", midpoint=0, limits = c(-2,2)), seriate = "none",
+              Colv = TRUE, col_side_colors = c("MV", "ME", "MX", "FV", "FE", "FX"),
+              side_color_layers = scale_fill_manual(values = c(
+              "MV"="purple", "ME"="blue", "MX"="green", 
+              "FV"="firebrick1", "FE"="darkorange", "FX"="gold")), 
+          file = "X_HM_2FC_group_MV.html")
+
+```
+
+
+###Make Volcano plots using the log2FoldChange and pAdj columns from the common gene lists made above. 
+  * Using all genes specifically DE to Sex/Tx/region. **Not using the vehicle male as a standard.**
+  * This does not use results where the log2FC has been binned to |2|
+  * Uniform plots need the axis to be fixed
+  
+```{r Function to generate volcano plots of log2FC x pAdj, plotting all DEGs for each group (sex/tx/region). }
+
+VP_html <- function(DEG_FDR) {
+  for (i in 1:6) {
+    SexTxNucleus <- names(DEG_FDR[i])
+    VP <- plot_ly(DEG_FDR[[i]], x = ~log2FoldChange, y= ~-log10(padj), type = "scatter", mode = "markers", 
+                  text = ~paste("ID: ", external_gene_name)) %>%
+    layout(title = sprintf("%s", SexTxNucleus), 
+           xaxis = list(range = c(-5.5, 5.5)),
+           yaxis = list(type = "log", range = c(0, 2.5)))
+  htmlwidgets::saveWidget(VP, sprintf("STAR_Kallisto_%s_VP_fixedaxis.html", SexTxNucleus))
+  }
+}
+
+VP_html(X_noADG)
+
+```
+
+###Load the Organism Database (OrgDB)
+* If you need an organism for which there is no pre-made OrgDB
+  + Create a database made from NCBI data using AnnotationForge
+  + Similar to loading a library package, but from a local .sqlite file
+    * If you need to make/update this .sqlite source file, then run:
+      + makeOrgPackageFromNCBI(version = "1.0", author = "yourname", maintainer = "yourname",
+        outputDir = "C:/Users/name/Documents/", tax_id = "59729", genus = "Taeniopygia", species = "guttata")
+    * This makes an OrgDB type object that is required to run all the functions in clusterProfiler
+* See AnnotationForge/AnnotationHub/AnnotationDbi documentation
+
+**For the zebra finch, annotation was poor so we used the Human Database**
+
+```{r Loading organism database information for ClusterProfiler}
+
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(enrichplot)
+library(AnnotationHub)
+library(AnnotationDbi)
+library(AnnotationForge)
+
+```
+
+###Make genelists for GO ontology dotplots
+* Make a list of character vectors of genes from each Sex/Tx
+* This format is needed for the clusterprofiler functions (See original clusterProfiler documentation)
+* Each list is a region for the Sex/Tx.
+  + Was run at least 4 times, once for each region
+  + **Area X** unpaired analysis is unique as FemVeh & FemExem have no DEGs, and are therefore empty. This will give NULL results.
+    * I have provided what I did to modify the enrich_GList function ("MakeGLX" & "enrich_GListX") needed for when some elements are NULL
+    * **ALWAYS CHECK YOUR DATA**
+
+
+```{r Function to make a list of common genes from each Sex/Tx/Region. Clusterprofiler needs this list of character vectors in order to work.}
+
+#What would be used if all elements have results
+MakeGL <- function(common_list){
+  GL_list <- list()
+  for (i in 1:6) {
+    GL_list[[i]] <- common_list[[i]][,1]
+  }
+  names(GL_list) <- names(common_list)
+  return(GL_list)
+}
+
+
+#I had to pull out the elements with results, discarding the ones that are empty
+MakeGLX <- function(common_list){
+  GL_list <- list()
+  for (i in 1:4) {
+    GL_list[[i]] <- common_list[[i]][,1]
+  }
+  names(GL_list) <- names(common_list)
+  return(GL_list)
+}
+
+
+X_noADG <- X_noADG[c(1:3,5)]
+X_GL <- MakeGLX(X_noADG)
+
+
+```
+
+
+
+
+
+###Run the enrichGO function to get the GO terms associated with the genelist given
+* Function to run enrichGO for each character vector in the list
+  + These are gene names "SYMBOL" and not the ensemble tags or other annotation features
+    * Should reduce some of the concerns with using a human OrgDB instead of a zebra finch OrgDB
+* Pulls top GO terms passing FDR < 0.01 after BH (Benjamini Hochberg) correction 
+* For parameter details, see clusterProfiler documentation
+
+```{r Function to run ClusterProfiler's enrichGO function for each gene list of DEGs generated for each group (Sex/Tx/Region) and return the results as a list item.}
+
+#What would be used if all elements have results
+enrich_GList <- function(GL){
+  enrich_GO_list <- list()
+  for (i in 1:6) {
+    enrich_GO_list[[i]] <- enrichGO(gene = GL[[i]], OrgDb = org.Hs.eg.db, keyType = "SYMBOL", 
+                                    ont = "ALL", pAdjustMethod = "BH", pvalueCutoff = 0.05, qvalueCutoff = 0.1)
+  }
+  names(enrich_GO_list) <- names(GL)
+  return(enrich_GO_list)
+}
+
+#What I used after discarding emply/NULL elements
+enrich_GListX <- function(GL){
+  enrich_GO_list <- list()
+  for (i in 1:4) {
+    enrich_GO_list[[i]] <- enrichGO(gene = GL[[i]], OrgDb = org.Hs.eg.db, keyType = "SYMBOL", 
+                                    ont = "ALL", pAdjustMethod = "BH", pvalueCutoff = 0.05, qvalueCutoff = 0.1)
+  }
+  names(enrich_GO_list) <- names(GL)
+  return(enrich_GO_list)
+}
+
+X_GO <- enrich_GListX(X_GL)
+
+```
+
+###Make dotplots from enrichGO results
+* Font is typically very small, so for publication the font size was increased
+  + Increasing font size creates a crowding issue
+  + We reduced the number of top catagories shown to prevent crowding.
+
+```{r Function to make and export dotplots from the enrichGO results}
+
+MakeDotplot_list <- function(enrichGO_list){
+  for (i in 1:length(enrichGO_list)) {
+    Label <- names(enrichGO_list[i])
+    dotplot(enrichGO_list[[i]], split = "ONTOLOGY", title = Label, showCategory = 8, font.size=15) + 
+      theme(plot.title = element_text(size = 20, face = "bold", hjust = 0.5)) +
+      theme(legend.text = element_text(size = 15)) +
+      theme(legend.title = element_text(size = 20, face = "bold")) +
+      scale_y_discrete(labels=function(x) str_wrap(x, width = 60), expand = expansion(mult = 0.1)) +
+      facet_grid(ONTOLOGY~., scale = "free") +
+      ggsave(sprintf("%s_GO_dotplot.svg", Label), width = 10, height = 7) +
+      ggsave(sprintf("%s_GO_dotplot.png", Label), width = 10, height = 7)
+    }
+}
+
+MakeDotplot_list(X_GO)
+
+```
+
+###Make Venn Diagrams/Euler plots to find DEGs with FDR < 0.05 shared between different groups
+* Make VennEuler plots using the common gene list (GL not GO) made above. 
+  + Uses all passing genes to compare what is DE between groups.
+  + **DOUBLE CHECK YOUR DATA** example shown here has female veh/exem that do not have any DEGs and empty lists
+* VE plots are useless after 4 groups, so make several by a common variable: sex/Tx/song
+  + 5 way VE plots are possible, but difficult to read
+
+```{r Split the gene lists into their respective groups for creating a VennEuler plot. Be mindful of column organization.}
+
+library(eulerr)
+library(ggplot2)
+
+#Split into Male(3Tx) and Female (3Tx)
+Mal_X <- X_GL[c(1:3)]
+Fem_X <- X_GL[c(4:6)] #Female Veh and Exem does not exist so this is moot but left for example
+
+#Split into Veh(2Sex), E2(2Sex), and Exem(2Sex)
+Veh_X <- X_GL[c(1,4)] #Female Veh does not exist
+
+E2_X <- X_GL[c(2,4)] #Fem Veh does not exist, so what should be column 5 is now column 4. Double check your data
+
+Exem_X <- X_GL[c(3,6)] #Fem Exem does not exist
+
+#Function to make the VennEuler plots
+Export_plot <- function(List_Venn, SexNucleus){
+  Venn <- plot(venn(List_Venn))
+  ggsave(sprintf("%s_Venn.svg", SexNucleus), plot = Venn, width = 5, height = 5)
+  ggsave(sprintf("%s_Venn.png", SexNucleus), plot = Venn, width = 5, height = 5)
+}
+
+#Will only run on the 2 viable lists, Males(3Tx) and E2 (2Sex)
+Export_plot(Mal_X, "Mal_X")
+Export_plot(E2_X, "E2_X")
+
+
+```
+
+###To compare individuals with song, after removing DEGs shared with non-song groups
+* Compares all male groups and estrogen treated females
+* Removes DEGs shared with vehicle and exemestane treated females
+  + Song(MV,ME,MX,FE) - noSong(FV,FX)
+  + LMAN included as an example since there are no DEGs in the Area X of vehicle and exemestane treated females
+    * LMAN data not included in the vignette, but can be done on your own using the scripts provided in this vignette.
+      + Count matrix provided as a supplemental "data in brief" with publication, alongside sample ID/library ID key.
+```{r}
+
+#Song_LMAN <- LMAN_GL[c(1:3,5)] #Not in vignette, just an example of ordering
+#NoSong_LMAN <- LMAN_GL[c(4,6)] #Not in vignette, just an example of ordering
+
+Song_X <- X_GL[c(1:3,4)]
+#NoSong_X <- X_GL[c(4,6)] #There is not Fem Veh or Exem
+
+
+Remove_noSong <- function(List_Song, List_noSong){
+  Song_Only <- list()
+  for (i in 1:4) {
+    Song_list <- List_Song[[i]][!List_Song[[i]] %in% List_noSong[[1]]]
+    Song_list <- Song_list[!Song_list %in% List_noSong[[2]]]
+    Song_Only[[i]] <- Song_list
+  }
+  names(Song_Only) <- names(List_Song)
+  return(Song_Only)
+}
+
+#JustSong_LMAN <- Remove_noSong(Song_LMAN, NoSong_LMAN) #Not included in vignette
+#Export_plot(JustSong_LMAN, "Song_LMAN") #Not included in vignette
+
+Export_plot(Song_X, "Song_X")
+
+```
+
+##If there are any questions, please send questions to Ha Na Choe, PhD @ ha.choe@duke.edu
